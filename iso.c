@@ -106,6 +106,7 @@ iso_recv_msg(uint8 * code, uint8 * rdpver)
 	uint16 length;
 	uint8 version;
 
+	//先填充TPKT头，获取整个payload长度
 	s = tcp_recv(NULL, 4);
 	if (s == NULL)
 		return NULL;
@@ -131,6 +132,7 @@ iso_recv_msg(uint8 * code, uint8 * rdpver)
 		error("Bad packet header\n");
 		return NULL;
 	}
+	//再获取X224头及后续数据
 	s = tcp_recv(s, length - 4);
 	if (s == NULL)
 		return NULL;
@@ -138,6 +140,7 @@ iso_recv_msg(uint8 * code, uint8 * rdpver)
 		return s;
 	in_uint8s(s, 1);	/* hdrlen */
 	in_uint8(s, *code);
+	//解析完X224头，s最终定位在t.125位置
 	if (*code == ISO_PDU_DT)
 	{
 		in_uint8s(s, 1);	/* eot */
@@ -229,8 +232,10 @@ iso_connect(char *server, char *username, char *domain, char *password,
 	if (!tcp_connect(server))
 		return False;
 
+	//Client X.224 Connection Request
 	iso_send_connection_request(username, neg_proto);
 
+	//Server X.224 Connection Confirm
 	s = iso_recv_msg(&code, NULL);
 	if (s == NULL)
 		return False;

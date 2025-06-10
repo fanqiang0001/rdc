@@ -97,6 +97,7 @@ mcs_recv_connect_response(STREAM mcs_data)
 	STREAM s;
 	struct stream packet;
 	s = iso_recv(NULL);
+	//s在t.125头开始位置
 	if (s == NULL)
 		return False;
 
@@ -123,7 +124,7 @@ mcs_recv_connect_response(STREAM mcs_data)
 	mcs_parse_domain_params(s);
 
 	ber_parse_header(s, BER_TAG_OCTET_STRING, &length);
-
+	//s在t.124头开始位置
 	sec_process_mcs_data(s);
 	/*
 	   if (length > mcs_data->size)
@@ -336,8 +337,9 @@ RD_BOOL
 mcs_connect_finalize(STREAM mcs_data)
 {
 	unsigned int i;
-
+	//Client MCS Connect Initial
 	mcs_send_connect_initial(mcs_data);
+	//Server MCS Connect Response 处理rdp安全参数（随机数、证书）
 	if (!mcs_recv_connect_response(mcs_data))
 		goto error;
 
@@ -358,7 +360,9 @@ mcs_connect_finalize(STREAM mcs_data)
 
 	for (i = 0; i < g_num_channels; i++)
 	{
+		//Client MCS Channel Join Request
 		mcs_send_cjrq(g_channels[i].mcs_id);
+		//Server MCS Channel Join Confirm
 		if (!mcs_recv_cjcf())
 			goto error;
 	}

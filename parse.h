@@ -25,7 +25,7 @@
 typedef struct stream
 {
 	unsigned char *p;
-	unsigned char *end;
+	unsigned char *end; //指向有效长度的下一个位置 = p+size
 	unsigned char *data;
 	unsigned int size;
 

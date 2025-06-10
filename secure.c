@@ -54,6 +54,7 @@ static uint8 g_sec_crypted_random[SEC_MAX_MODULUS_SIZE];
 uint16 g_server_rdp_version = 0;
 
 /* These values must be available to reset state - Session Directory */
+//总的加解密次数，各自4096次后更新密钥
 static int g_sec_encrypt_use_count = 0;
 static int g_sec_decrypt_use_count = 0;
 
@@ -156,25 +157,34 @@ sec_generate_keys(uint8 * client_random, uint8 * server_random, int rc4_key_size
 	uint8 key_block[48];
 
 	/* Construct pre-master secret */
+	//PreMasterSecret = First192Bits(ClientRandom) + First192Bits(ServerRandom)
 	memcpy(pre_master_secret, client_random, 24);
 	memcpy(pre_master_secret + 24, server_random, 24);
 
 	/* Generate master secret and then key material */
+	//MasterSecret = PreMasterHash(0x41) + PreMasterHash(0x4242) + PreMasterHash(0x434343)
 	sec_hash_48(master_secret, pre_master_secret, client_random, server_random, 'A');
+	//SessionKeyBlob = MasterHash(0x58) + MasterHash(0x5959) + MasterHash(0x5A5A5A)
 	sec_hash_48(key_block, master_secret, client_random, server_random, 'X');
 
 	/* First 16 bytes of key material is MAC secret */
+	//MACKey128 = First128Bits(SessionKeyBlob)
 	memcpy(g_sec_sign_key, key_block, 16);
 
 	/* Generate export keys from next two blocks of 16 bytes */
+	//InitialClientDecryptKey128 = FinalHash(Second128Bits(SessionKeyBlob))
 	sec_hash_16(g_sec_decrypt_key, &key_block[16], client_random, server_random);
+	//InitialClientEncryptKey128 = FinalHash(Third128Bits(SessionKeyBlob))
 	sec_hash_16(g_sec_encrypt_key, &key_block[32], client_random, server_random);
 
 	if (rc4_key_size == 1)
 	{
 		DEBUG(("40-bit encryption enabled\n"));
+		//MACKey40 = 0xD1269E + Last40Bits(First64Bits(MACKey128))
 		sec_make_40bit(g_sec_sign_key);
+		//InitialClientEncryptKey40 = 0xD1269E + Last40Bits(First64Bits(InitialClientEncryptKey128))
 		sec_make_40bit(g_sec_decrypt_key);
+		//InitialClientDecryptKey40 = 0xD1269E + Last40Bits(First64Bits(InitialClientDecryptKey128))
 		sec_make_40bit(g_sec_encrypt_key);
 		g_rc4_key_len = 8;
 	}
@@ -229,6 +239,7 @@ sec_sign(uint8 * signature, int siglen, uint8 * session_key, int keylen, uint8 *
 
 	buf_out_uint32(lenhdr, datalen);
 
+	//SHAComponent = SHA(MACKeyN + Pad1 + DataLength + Data)
 	rdssl_sha1_init(&sha1);
 	rdssl_sha1_update(&sha1, session_key, keylen);
 	rdssl_sha1_update(&sha1, pad_54, 40);
@@ -236,6 +247,7 @@ sec_sign(uint8 * signature, int siglen, uint8 * session_key, int keylen, uint8 *
 	rdssl_sha1_update(&sha1, data, datalen);
 	rdssl_sha1_final(&sha1, shasig);
 
+	//MACSignature = First64Bits(MD5(MACKeyN + Pad2 + SHAComponent))
 	rdssl_md5_init(&md5);
 	rdssl_md5_update(&md5, session_key, keylen);
 	rdssl_md5_update(&md5, pad_92, 48);
@@ -254,19 +266,23 @@ sec_update(uint8 * key, uint8 * update_key)
 	RDSSL_MD5 md5;
 	RDSSL_RC4 update;
 
+	//SHAComponent = SHA(InitialEncryptKey + Pad1 + CurrentEncryptKey)
 	rdssl_sha1_init(&sha1);
 	rdssl_sha1_update(&sha1, update_key, g_rc4_key_len);
 	rdssl_sha1_update(&sha1, pad_54, 40);
 	rdssl_sha1_update(&sha1, key, g_rc4_key_len);
 	rdssl_sha1_final(&sha1, shasig);
 
+	//TempKey128 = MD5(InitialEncryptKey + Pad2 + SHAComponent)
 	rdssl_md5_init(&md5);
 	rdssl_md5_update(&md5, update_key, g_rc4_key_len);
 	rdssl_md5_update(&md5, pad_92, 48);
 	rdssl_md5_update(&md5, shasig, 20);
 	rdssl_md5_final(&md5, key);
 
+	//S-TableEncrypt = InitRC4(TempKey128)
 	rdssl_rc4_set_key(&update, key, g_rc4_key_len);
+	//NewEncryptKey128 = RC4(TempKey128, S-TableEncrypt)
 	rdssl_rc4_crypt(&update, key, key, g_rc4_key_len);
 
 	if (g_rc4_key_len == 8)
@@ -315,19 +331,22 @@ sec_rsa_encrypt(uint8 * out, uint8 * in, int len, uint32 modulus_size, uint8 * m
 }
 
 /* Initialise secure transport packet */
+//申请一块内存，自动累加各层长度，返回s指向待加密的数据起始位置（签名字段后）
 STREAM
 sec_init(uint32 flags, int maxlen)
 {
 	int hdrlen;
 	STREAM s;
 
+	//根据加密标记rdp头预留8字节的签名部分，rc4算法不改变加密后的报文长度
 	if (!g_licence_issued && !g_licence_error_result)
 		hdrlen = (flags & SEC_ENCRYPT) ? 12 : 4;
 	else
 		hdrlen = (flags & SEC_ENCRYPT) ? 12 : 0;
 	s = mcs_init(maxlen + hdrlen);
+	//此时s指向t.125之后的rdp报文头位置
 	s_push_layer(s, sec_hdr, hdrlen);
-
+	//此时s指向rdp签名字段后的数据开始位置
 	return s;
 }
 
@@ -356,7 +375,7 @@ sec_send_to_channel(STREAM s, uint32 flags, uint16 channel)
 		DEBUG(("Sending encrypted packet:\n"));
 		hexdump(data + 8, datalen);
 #endif
-
+		//签名及加密数据
 		sec_sign(data, 8, g_sec_sign_key, g_rc4_key_len, data + 8, datalen);
 		sec_encrypt(data + 8, datalen);
 	}
@@ -373,6 +392,7 @@ sec_send_to_channel(STREAM s, uint32 flags, uint16 channel)
 void
 sec_send(STREAM s, uint32 flags)
 {
+	//根据flags标记决定是否加密rdp数据
 	sec_send_to_channel(s, flags, MCS_GLOBAL_CHANNEL);
 }
 
@@ -565,6 +585,7 @@ sec_parse_crypt_info(STREAM s, uint32 * rc4_key_size,
 	uint16 tag, length;
 	size_t next_tag;
 
+	//提取encryptionMethod
 	in_uint32_le(s, *rc4_key_size);	/* 1 = 40-bit, 2 = 128-bit */
 	in_uint32_le(s, crypt_level);	/* 1 = low, 2 = medium, 3 = high */
 	if (crypt_level == 0)
@@ -573,7 +594,9 @@ sec_parse_crypt_info(STREAM s, uint32 * rc4_key_size,
 		return False;
 	}
 
+	//提取serverRandomLen
 	in_uint32_le(s, random_len);
+	//提取serverCertLen
 	in_uint32_le(s, rsa_info_len);
 
 	if (random_len != SEC_RANDOM_SIZE)
@@ -582,12 +605,14 @@ sec_parse_crypt_info(STREAM s, uint32 * rc4_key_size,
 		return False;
 	}
 
+	//提取serverRandom
 	in_uint8p(s, *server_random, random_len);
 
 	/* RSA info */
 	if (!s_check_rem(s, rsa_info_len))
 		return False;
 
+	//提取证书类型
 	in_uint32_le(s, flags);	/* 1 = RDP4-style, 0x80000002 = X.509 */
 	if (flags & 1)
 	{
@@ -628,12 +653,14 @@ sec_parse_crypt_info(STREAM s, uint32 * rc4_key_size,
 		unsigned char *certdata;
 
 		DEBUG_RDP5(("We're going for the RDP5-style encryption\n"));
+		//获取证书链中证书数量，证书的存储顺序是Root-CA → Intermediate-CA → CA → Server-Cert，最后两个为本服务器及授权服务器证书
 		in_uint32_le(s, certcount);	/* Number of certificates */
 		if (certcount < 2)
 		{
 			error("Server didn't send enough X509 certificates\n");
 			return False;
 		}
+		//跳过前面的证书，只处理最后2个整数
 		for (; certcount > 2; certcount--)
 		{		/* ignore all the certificates between the root and the signing CA */
 			uint32 ignorelen;
@@ -726,19 +753,23 @@ sec_process_crypt_info(STREAM s)
 	uint8 *server_random = NULL;
 	uint8 modulus[SEC_MAX_MODULUS_SIZE];
 	uint8 exponent[SEC_EXPONENT_SIZE];
-	uint32 rc4_key_size;
+	uint32 rc4_key_size; //存储encryptionMethod字段, 1 = 40-bit, 2 = 128-bit
 
 	memset(modulus, 0, sizeof(modulus));
 	memset(exponent, 0, sizeof(exponent));
+	//从证书信息提取公钥加密参数
 	if (!sec_parse_crypt_info(s, &rc4_key_size, &server_random, modulus, exponent))
 	{
 		DEBUG(("Failed to parse crypt info\n"));
 		return;
 	}
 	DEBUG(("Generating client random\n"));
+	//生成客户端随机数
 	generate_random(g_client_random);
+	//使用公钥信息加密客户端随机数，后续传递给服务端
 	sec_rsa_encrypt(g_sec_crypted_random, g_client_random, SEC_RANDOM_SIZE,
 			g_server_public_key_len, modulus, exponent);
+	//根据双方随机数及加密类型生成加密密钥
 	sec_generate_keys(g_client_random, server_random, rc4_key_size);
 }
 
@@ -787,6 +818,7 @@ sec_process_mcs_data(STREAM s)
 				break;
 
 			case SEC_TAG_SRV_CRYPT:
+				//s指向Server Security Data的encryptionMethod
 				sec_process_crypt_info(s);
 				break;
 
@@ -947,11 +979,13 @@ sec_connect(char *server, char *username, char *domain, char *password, RD_BOOL 
 	STREAM mcs_data;
 
 	/* Start a MCS connect sequence */
+	//建立X224链接
 	if (!mcs_connect_start(server, username, domain, password, reconnect, &selected_proto))
 		return False;
 
 	/* We exchange some RDP data during the MCS-Connect */
 	mcs_data = s_alloc(512);
+	//构造Client MCS Connect Initial中的Client Data Blocks
 	sec_out_mcs_data(mcs_data, selected_proto);
 
 	/* finialize the MCS connect sequence */
@@ -960,6 +994,7 @@ sec_connect(char *server, char *username, char *domain, char *password, RD_BOOL 
 
 	/* sec_process_mcs_data(&mcs_data); */
 	if (g_encryption)
+		//Client Security Exchange 发送客户端随机数（已用公钥加密）
 		sec_establish_key();
 	s_free(mcs_data);
 	return True;

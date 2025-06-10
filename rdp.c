@@ -1822,6 +1822,7 @@ rdp_connect(char *server, uint32 flags, char *domain, char *password,
 	if (!sec_connect(server, g_username, domain, password, reconnect))
 		return False;
 
+	//Client Info 包含登录及客户端环境信息
 	rdp_send_logon_info(flags, domain, g_username, password, command, directory);
 
 	/* run RDP loop until first licence demand active PDU */
